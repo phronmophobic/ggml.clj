@@ -107,6 +107,7 @@
   (def my-graph
     (fn my-graph [ctx a b]
       (let [out (raw/ggml_scale ctx (raw/ggml_add ctx a b) -1)]
+        ;; multiple outputs
         [out
          (raw/ggml_sum_rows ctx out)])))
 
