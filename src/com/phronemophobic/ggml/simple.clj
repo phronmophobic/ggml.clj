@@ -1,29 +1,27 @@
 (ns com.phronemophobic.ggml.simple
   (:require [clojure.java.io :as io]
             [clojure.pprint :refer [pprint]]
-            [com.phronemophobic.ggml.impl.raw :as raw])
-  (:import
-   com.sun.jna.Memory
-   com.sun.jna.Pointer
-   com.sun.jna.ptr.PointerByReference
-   com.sun.jna.ptr.LongByReference
-   com.sun.jna.Structure)
+            [com.phronemophobic.ggml.impl.raw :as raw]
+            [tech.v3.datatype.struct :as dt-struct]
+            [tech.v3.datatype.protocols :as dtype-proto]
+            [tech.v3.datatype.native-buffer :as native-buffer]
+            [tech.v3.datatype :as dtype]
+            [tech.v3.datatype.ffi :as dt-ffi])
+  (:import [tech.v3.datatype.ffi Pointer])
   (:gen-class))
 
-(raw/import-structs)
-(defn float-buf [xs]
-  (let [arr (float-array xs)
-        mem (Memory. (* 4 (alength arr)))]
-    (.write mem 0 arr 0 (alength arr))
-    mem))
-
-(def graph-buf (Memory. (* 10 1024 1024)))
+(def graph-buf
+  (native-buffer/malloc (* 10 1024 1024)))
 (defn build-graph [t1 t2]
-  (let [params (doto (ggml_init_params. )
-                 ;; 10M
-                 (.writeField "mem_size" (.size graph-buf))
-                 (.writeField "mem_buffer" graph-buf)
-                 (.writeField "no_alloc" (byte 1)))
+  (let [;; params (doto (ggml_init_params. )
+        ;;          ;; 10M
+        ;;          (.writeField "mem_size" (.size graph-buf))
+        ;;          (.writeField "mem_buffer" graph-buf)
+        ;;          (.writeField "no_alloc" (byte 1)))
+        params (dt-struct/map->struct :ggml_init_params
+                                      {:mem_size (native-buffer/native-buffer-byte-len graph-buf)
+                                       :mem_buffer (.address (dt-ffi/->pointer graph-buf))
+                                       :no_alloc 1})
         ctx (raw/ggml_init params)
         gf (raw/ggml_new_graph ctx)
         result (raw/ggml_mul_mat ctx t1 t2)]
@@ -39,21 +37,44 @@
 
     (raw/ggml_backend_graph_compute backend gf)
 
+
     (let [
-          n-nodes (.readField gf "n_nodes")
-          nodes (.getPointerArray (.readField gf "nodes") 0 n-nodes)]
-      (last nodes))))
+          buf (native-buffer/wrap-address (.address gf)
+                                          (-> :ggml_cgraph
+                                              dt-struct/get-struct-def
+                                              :datatype-size)
+                                          nil)
+          gf (dt-struct/inplace-new-struct
+              :ggml_cgraph
+              buf)
+
+          n-nodes (:n_nodes gf) #_(.readField gf "n_nodes")
+
+          nodes (-> (native-buffer/wrap-address (:nodes gf)
+                                             (* 8 n-nodes)
+                                             nil)
+                    (native-buffer/set-native-datatype :int64))
+          last-node-address (last nodes)
+          #_(ffi/long->pointer (.getLong  (native-buffer/unsafe) (:nodes gf)))
+
+          ;;nodes (.getPointerArray (.readField gf "nodes") 0 n-nodes)
+          ]
+      (Pointer. last-node-address))))
 
 (defn -main []
 
   (def backend (raw/ggml_backend_cpu_init))
 
+
   (def init-params
-    (doto (ggml_init_params. )
-      ;; 10M
-      (.writeField "mem_size" (* 10 1024 1024))
-      (.writeField "no_alloc" (byte 1))
-      ))
+    (dt-struct/map->struct :ggml_init_params
+                           {:mem_size (* 10 1024 1024)
+                            :no_alloc 1})
+    #_(doto (ggml_init_params. )
+        ;; 10M
+        (.writeField "mem_size" (* 10 1024 1024))
+        (.writeField "no_alloc" (byte 1))
+        ))
 
   (def ctx (raw/ggml_init init-params))
 
@@ -69,7 +90,8 @@
               8 6]]
     (raw/ggml_backend_tensor_set
      t1
-     (float-buf nums)
+     ;;(float-buf nums)
+     (dtype/make-container :native-heap :float32 nums)
      0 (* 4 (count nums))))
 
   (let [nums [10 5
@@ -77,7 +99,7 @@
               5 4]]
     (raw/ggml_backend_tensor_set
      t2
-     (float-buf nums)
+     (dtype/make-container :native-heap :float32 nums)
      0 (* 4 (count nums))))
 
   (def gf (build-graph t1 t2))
@@ -88,16 +110,18 @@
           gf (build-graph t1 t2)
           _ (raw/ggml_gallocr_reserve allocr gf)
           mem-size (raw/ggml_gallocr_get_buffer_size allocr 0)]
-      (prn (/ mem-size 1024.0))
       allocr))
 
   (def result-node (compute backend t1 t2 allocr))
 
   (def result-n (raw/ggml_nelements result-node))
-  (def result-out (Memory. (* 4 result-n)))
+  
+  ;; (def result-out (Memory. (* 4 result-n)))
+  (def result-out (dtype/make-container :native-heap :float32 result-n))
   (raw/ggml_backend_tensor_get result-node result-out 0 (raw/ggml_nbytes result-node))
 
-  (prn (seq (.getFloatArray result-out 0 result-n)))
+  (prn result-out)
+  ;; (prn (seq (.getFloatArray result-out 0 result-n)))
 
   
   
