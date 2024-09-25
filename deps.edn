@@ -1,7 +1,12 @@
 {:paths ["src" "resources"]
- :deps {org.clojure/clojure {:mvn/version "1.12.0-alpha3"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         net.java.dev.jna/jna {:mvn/version "5.13.0"}
-        com.phronemophobic/clong {:mvn/version "1.4.1"}}
+        cnuernber/dtype-next {;;:mvn/version "10.116"
+                              ;; :local/root "../dtype-next"
+                              :git/url "https://github.com/phronmophobic/dtype-next/"
+                              :git/sha "b9d0106b3bb7b4b094e4b5c9fcadf1182731bc5c"
+                              }
+        com.phronemophobic/clong {:mvn/version "1.4.3"}}
  :aliases
  {:project
   {:extra-deps {org.bytedeco/llvm-platform {:mvn/version "16.0.4-1.5.9"}
