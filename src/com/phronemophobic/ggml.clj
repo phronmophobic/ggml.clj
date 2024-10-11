@@ -179,7 +179,7 @@
                                                (buffer-ggml-type arr)
                                                (count dshape)
                                                (dtype/make-container :native-heap :int64
-                                                                     dshape))))
+                                                                     (reverse dshape)))))
                       inputs)
 
         gf (raw/ggml_new_graph ctx)
@@ -199,7 +199,7 @@
 
         results (into []
                       (map (fn [output]
-                             (let [shape (get-shape output)
+                             (let [shape (reverse (get-shape output))
                                    dtype (tensor-dtype output)
                                    dtt (dtt/native-tensor shape dtype)
                                    buf (native-buffer/ensure-native dtt)]
