@@ -6,6 +6,7 @@
             [tech.v3.datatype.protocols :as dtype-proto]
             [tech.v3.datatype.native-buffer :as native-buffer]
             [tech.v3.datatype :as dtype]
+            [tech.v3.tensor :as dtt]
             [tech.v3.datatype.ffi :as dt-ffi])
   (:import [tech.v3.datatype.ffi Pointer])
   (:gen-class))
@@ -135,6 +136,31 @@
     sched))
 
 
+(defn ->tensor
+  "Constructs a ggml tensor from a dtype tensor"
+  [ctx dtt]
+  (let [tensor (raw/ggml_new_tensor ctx
+                                    (buffer-ggml-type dtt)
+                                    (.rank dtt)
+                                    (dtype/make-container :native-heap :int64
+                                                          (dtype/shape dtt)))]
+    (let [buf (native-buffer/ensure-native dtt)]
+      (raw/ggml_backend_tensor_set tensor buf 0 (native-buffer/native-buffer-byte-len buf)))))
+
+(defn get-shape [tensor]
+  (let [struct (ptr->struct tensor :ggml_tensor)
+        shape (:ne struct)]
+    ;; remove degenerate higher dimensions
+    ;;     every tensor is technically 4 dimensions with
+    ;;     for eg, a 2d vector will have the 3rd and 4th
+    ;;     dimension set to 1
+    (if (= shape [1 1 1 1])
+      [1]
+      (->> shape
+           reverse
+           (drop-while #(= 1 %))
+           reverse
+           (into [])))))
 
 (defn compute [scheduler f & inputs]
 
@@ -148,7 +174,12 @@
           (.writeField "no_alloc" (byte 1)))
         ctx (raw/ggml_init params)
         tensors (mapv (fn [arr]
-                        (raw/ggml_new_tensor_1d ctx (buffer-ggml-type arr) (count arr)))
+                        (let [dshape (dtype/shape arr)]
+                          (raw/ggml_new_tensor ctx
+                                               (buffer-ggml-type arr)
+                                               (count dshape)
+                                               (dtype/make-container :native-heap :int64
+                                                                     dshape))))
                       inputs)
 
         gf (raw/ggml_new_graph ctx)
@@ -161,21 +192,19 @@
             (raw/ggml_backend_sched_reset scheduler)
             (raw/ggml_backend_sched_alloc_graph scheduler gf))
         _ (doseq [[arr tensor] (map vector inputs tensors)]
-            (let [;;data (Memory. (raw/ggml_nbytes tensor))
-                  buf (native-buffer/ensure-native arr)]
-              ;; (.write data 0 arr 0 (alength arr))
+            (let [buf (native-buffer/ensure-native arr)]
               (raw/ggml_backend_tensor_set tensor buf 0 (native-buffer/native-buffer-byte-len buf))))
 
         _   (raw/ggml_backend_sched_graph_compute scheduler gf)
 
         results (into []
                       (map (fn [output]
-                             (let [n (raw/ggml_nelements output)
+                             (let [shape (get-shape output)
                                    dtype (tensor-dtype output)
-                                   ;; buf (Memory. (raw/ggml_nbytes output))
-                                   buf (dtype/make-container :native-heap dtype n)
-                                   _ (raw/ggml_backend_tensor_get output buf 0 (native-buffer/native-buffer-byte-len buf))]
-                               buf)))
+                                   dtt (dtt/native-tensor shape dtype)
+                                   buf (native-buffer/ensure-native dtt)]
+                               (raw/ggml_backend_tensor_get output buf 0 (native-buffer/native-buffer-byte-len buf))
+                               dtt)))
                       outputs)]
     results))
 
@@ -198,8 +227,12 @@
   ;; (def a (float-array (repeatedly n rand)))
   ;; (def b (float-array (repeatedly n rand)))
 
-  (def a (dtype/make-container :native-heap :float32 (range 10)))
-  (def b (dtype/make-container :native-heap :float32 (range 10)))
+  (def a (dtt/->tensor (repeat 3 (range 2)) :container-type :native-heap :datatype :float32))
+  (def b (dtt/->tensor (repeat 3 (range 2)) :container-type :native-heap :datatype :float32))
+
+  ;; (def a (dtype/make-container :native-heap :float32 (range 10)))
+  ;; (def b (dtype/make-container :native-heap :float32 (range 10)))
+
 
   (def result-cpu (time (compute cpu-sched my-graph a b)))
   (def result-gpu (time (compute gpu-sched my-graph a b)))
