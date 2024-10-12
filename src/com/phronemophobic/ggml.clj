@@ -183,6 +183,7 @@
                       inputs)
 
         gf (raw/ggml_new_graph ctx)
+        _ (assert gf)
         outputs (apply f ctx tensors)
         _ (doseq [output outputs]
             (raw/ggml_build_forward_expand gf output))
