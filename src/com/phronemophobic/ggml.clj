@@ -93,11 +93,12 @@
   (let [
         cpu-backend (raw/ggml_backend_cpu_init)
 
-        _ (raw/ggml_backend_metal_log_set_callback
+        _ (raw/ggml_log_set
            log-callback-ptr
            nil)
         metal-backend (doto (raw/ggml_backend_metal_init)
-                        (raw/ggml_backend_metal_set_n_cb 4))
+                        ;;(raw/ggml_backend_metal_set_n_cb 4)
+                        )
 
         backends [metal-backend cpu-backend ]
         backends-buf (dtype/make-container :native-heap
@@ -118,11 +119,12 @@
   (let [
         cpu-backend (raw/ggml_backend_cpu_init)
 
-        _ (raw/ggml_backend_metal_log_set_callback
+        _ (raw/ggml_log_set
            log-callback-ptr
            nil)
         metal-backend (doto (raw/ggml_backend_metal_init)
-                        (raw/ggml_backend_metal_set_n_cb 4))
+                        ;;(raw/ggml_backend_metal_set_n_cb 4)
+                        )
 
         backends [ cpu-backend ]
         backends-buf (dtype/make-container :native-heap
@@ -208,6 +210,84 @@
                       outputs)]
     results))
 
+(def  GGML_DEFAULT_GRAPH_SIZE 2048)
+
+
+(defn get-gradient
+  "Returns a vector of gradients that match the tensors passed as parameters.
+
+  `f`: A function of `[ctx ~@params ~@other-inputs]` and should return a single tensor that represents the loss.
+  `params`: The tensor inputs that will have their gradients calculated.
+  `other-inputs`: Other tensor inputs that are treated as constants.
+
+  Only works with CPU backend currently."
+  [backend f params other-inputs]
+
+  (let [graph-params
+        (dt-struct/map->struct :ggml_init_params
+                               {:mem_size (* 50 1024 1024)
+                                :no_alloc 1})
+        ctx (raw/ggml_init graph-params)
+        all-inputs (into []
+                         cat
+                         [params other-inputs])
+        tensors (mapv (fn [arr]
+                        (let [dshape (dtype/shape arr)]
+                          (raw/ggml_new_tensor ctx
+                                               (buffer-ggml-type arr)
+                                               (count dshape)
+                                               (dtype/make-container :native-heap :int64
+                                                                     (reverse dshape)))))
+                      all-inputs)
+        tensor-params (into []
+                            (take (count params))
+                            tensors)
+        _ (doseq [param tensor-params]
+            (raw/ggml_set_param ctx param))
+
+        gf (raw/ggml_new_graph_custom ctx GGML_DEFAULT_GRAPH_SIZE 1)
+        _ (assert gf)
+
+        loss (apply f ctx tensors)
+        _ (raw/ggml_build_forward_expand gf loss)
+        gb (raw/ggml_graph_dup ctx gf )
+        _ (raw/ggml_build_backward_expand ctx gf gb 0)
+
+        _ (raw/ggml_backend_alloc_ctx_tensors ctx backend)
+        _ (raw/ggml_graph_reset gb)
+        
+        _ (doseq [[arr tensor] (map vector all-inputs tensors)]
+            (let [buf (native-buffer/ensure-native arr)]
+              (raw/ggml_backend_tensor_set tensor buf 0 (native-buffer/native-buffer-byte-len buf))))
+
+
+        _ (let [loss-grad (-> (ptr->struct loss :ggml_tensor)
+                              :grad
+                              raw/long->pointer)
+                buf (dtype/make-container :native-heap  :float32 [1.0])]
+            (raw/ggml_backend_tensor_set loss-grad buf 0 (native-buffer/native-buffer-byte-len buf)))
+
+        
+        _ (raw/ggml_backend_graph_compute backend gb)
+
+        _ (let [tensor loss
+                shape (reverse (get-shape tensor))
+                dtype (tensor-dtype tensor)
+                dtt (dtt/native-tensor shape dtype)
+                buf (native-buffer/ensure-native dtt)]
+            (raw/ggml_backend_tensor_get tensor buf 0 (native-buffer/native-buffer-byte-len buf))
+            (prn :loss (raw/ggml_get_f32_1d loss 0)
+                 dtt))
+
+        grads (into []
+                    (map (fn [param]
+                           (let [tensor (ptr->struct param :ggml_tensor)
+                                 grad (:grad tensor)
+                                 _ (assert (not (zero? grad)))
+                                 output (raw/long->pointer grad)]
+                             (raw/ggml_get_f32_1d output 0))))
+                    tensor-params)]
+    grads))
 
 (defn -main []
 
@@ -240,5 +320,73 @@
   (prn result-cpu
        result-gpu)
 
+  ;; n-embed length of embedding vector
+  (def n-embd 2)
+  ;; n-tokens number of distinct tokens
+  (def n-tokens 27)
+  ;; n-embed x n-token vector
+  (def tok-embeddings (-> (dtt/->tensor
+                           (into []
+                                 (map (fn [i]
+                                        [i (* 2 i)]))
+                                 (range 27))
+                           
+                           :datatype :float32 :container-type :native-heap))
+
+    )
+  ;; [[0.000 1.000 2.000 3.000 4.000 5.000 6.000 7.000 8.000 9.000 10.00 11.00 12.00 13.00 14.00 15.00 16.00 17.00 18.00 19.00 20.00 21.00 22.00 23.00 24.00 25.00 26.00]
+  ;;    [0.000 2.000 4.000 6.000 8.000 10.00 12.00 14.00 16.00 18.00 20.00 22.00 24.00 26.00 28.00 30.00 32.00 34.00 36.00 38.00 40.00 42.00 44.00 46.00 48.00 50.00 52.00]]
+  (def tokens
+    (-> (dtt/->tensor [ ;; [1] [0 ] [0] [0]
+                       [1 2 3] [3 4 5]
+                       ]
+                      :datatype :int32
+                      :container-type :native-heap)
+        (dtype/->buffer)))
+  ;; (def result)
+
+  (def new-shape (dtt/->tensor [2 3 2]
+                               :datatype :int32
+                               :container-type :native-heap))
+
+  (-> (compute cpu-sched
+               (fn [ctx arr idx 
+                    ]
+                 (let [rows (raw/ggml_get_rows ctx arr idx)
+                       emb (raw/ggml_reshape_3d ctx rows 2 3 2)]
+                   
+                   [emb]))
+               tok-embeddings
+               tokens
+
+               )
+      first
+      clojure.pprint/pprint)
+
+
+  (def metal-backend (raw/ggml_backend_metal_init))
+  (def cpu-backend (raw/ggml_backend_cpu_init))
+
+  (prn
+   :train
+   (train cpu-backend
+          (fn [ctx x a]
+            (let [b (raw/ggml_mul ctx x x)
+                  f (raw/ggml_mul ctx b a)]
+              f)
+            )
+          [(dtt/->tensor
+            [3.0]
+            :datatype :float32
+            :container-type :native-heap)]
+          [ (dtt/->tensor
+             [3.0]
+             :datatype :float32
+             :container-type :native-heap)]
+          ))
+  
+
+
   ,)
+
 
