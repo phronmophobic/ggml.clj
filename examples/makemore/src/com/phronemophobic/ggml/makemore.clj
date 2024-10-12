@@ -1,5 +1,12 @@
 (ns com.phronemophobic.ggml.makemore
   (:require [com.phronemophobic.ggml :as ggml]
+            [com.phronemophobic.ggml.impl.raw :as raw]
+            [tech.v3.datatype.struct :as dt-struct]
+            [tech.v3.datatype.protocols :as dtype-proto]
+            [tech.v3.datatype.native-buffer :as native-buffer]
+            [tech.v3.datatype :as dtype]
+            [tech.v3.datatype.ffi :as dt-ffi]
+            [tech.v3.tensor :as dtt]
             [clojure.string :as str]
             [clojure.java.io :as io]))
 
@@ -7,7 +14,7 @@
             (slurp (io/resource "names.txt"))))
 
 
-
+;; https://github.com/karpathy/nn-zero-to-hero/blob/master/lectures/makemore/makemore_part2_mlp.ipynb
 
 ;; import torch
 ;; import torch.nn.functional as F
@@ -59,25 +66,107 @@
 ;;     context = context[1:] + [ix] # crop and append
 
 
-(def X
+(def YX
   (into []
-        (mapcat
-         (fn [word]
-           (eduction
-            (map (fn [i]
-                   (into []
-                         (comp
-                          (map inc)
-                          (map (fn [j]
-                                 (nth word j "."))))
-                         (range (- i block-size) i))))
-            (range (+ (count word) (dec block-size))))))
+        (comp
+         (take 10)
+         (mapcat
+          (fn [word]
+            (eduction
+             ;; tuple of [next-char vector-of-block-size-preceding-chars]
+             (map (fn [i]
+                    [(nth word i ".")
+                     (into []
+                           (comp
+                            (map (fn [j]
+                                   (nth word j "."))))
+                           (range (- i block-size) i))]))
+             ;; map characters to numbers
+             (map (fn [[k context]]
+                    [(stoi k)
+                     (mapv stoi context)]))
+             (range (+ (count word)
+                       1))))))
         words))
 
+(def X (-> (dtt/->tensor (into
+                       []
+                       (mapcat second)
+                       YX)
+                      :datatype :int32
+                      :container-type :native-heap)))
+(def Y (dtt/->tensor (into
+                      []
+                      (map first)
+                      YX)
+                     :datatype :int32
+                     :container-type :native-heap))
+
+
+(def ^:private ggml-type->dtype
+  { ;; raw/GGML_TYPE_BF16
+   ;; raw/GGML_TYPE_F16
+   raw/GGML_TYPE_F32 :float32
+   raw/GGML_TYPE_F64 :float64
+   raw/GGML_TYPE_I16 :int16
+   raw/GGML_TYPE_I32 :int32
+   raw/GGML_TYPE_I64 :int64
+   raw/GGML_TYPE_I8 :int8
+   ;;  raw/GGML_TYPE_IQ1_M
+   ;;  raw/GGML_TYPE_IQ1_S
+   ;;  raw/GGML_TYPE_IQ2_S
+   ;;  raw/GGML_TYPE_IQ2_XS
+   ;;  raw/GGML_TYPE_IQ2_XXS
+   ;;  raw/GGML_TYPE_IQ3_S
+   ;;  raw/GGML_TYPE_IQ3_XXS
+   ;;  raw/GGML_TYPE_IQ4_NL
+   ;;  raw/GGML_TYPE_IQ4_XS
+   ;;  raw/GGML_TYPE_Q2_K
+   ;;  raw/GGML_TYPE_Q3_K
+   ;;  raw/GGML_TYPE_Q4_0
+   ;;  raw/GGML_TYPE_Q4_1
+   ;;  raw/GGML_TYPE_Q4_K
+   ;;  raw/GGML_TYPE_Q5_0
+   ;;  raw/GGML_TYPE_Q5_1
+   ;;  raw/GGML_TYPE_Q5_K
+   ;;  raw/GGML_TYPE_Q6_K
+   ;;  raw/GGML_TYPE_Q8_0
+   ;;  raw/GGML_TYPE_Q8_1
+   ;; raw/GGML_TYPE_Q8_K
+   }
+  )
+(def ^:private dtype->ggml-type
+  (into {}
+        (map (fn [[a b]]
+               [b a]))
+        ggml-type->dtype))
+
+;; (def params (dt-struct/map->struct :ggml_init_params
+;;                                    {:mem_size (* 16 1024 1024)
+;;                                     :no_alloc 1}))
+;; (defonce ctx (raw/ggml_init params))
+(def emb-size 2)
+(def num-tokens 27)
+;; (def C (raw/ggml_new_tensor_2d ctx (dtype->ggml-type :float32) emb-size num-tokens))
+;; C = torch.randn((27, 2))
+(def C (dtt/new-tensor [27 emb-size]
+                       :datatype :float32
+                       :container-type :native-heap))
+(dtype/copy! 
+ (dtt/compute-tensor
+  [27 emb-size]
+  (fn [& args]
+    (rand))
+  :float32)
+ C)
+
+
 ;; X = torch.tensor(X)
+
 ;; Y = torch.tensor(Y)
 
 ;; X.shape, X.dtype, Y.shape, Y.dtype
+
 
 ;; # build the dataset
 ;; block_size = 3 # context length: how many characters do we take to predict the next one?
@@ -114,10 +203,21 @@
 ;; torch.Size([22902, 3]) torch.Size([22902])
 ;; torch.Size([22803, 3]) torch.Size([22803])
 
+(def my-graph
+  (fn [ctx X C]
+    (let [ ;; emb = C[X]
+          flat-emb (raw/ggml_get_rows ctx C X)
+          emb (raw/ggml_reshape_3d ctx flat-emb emb-size block-size (count YX))
+          loss (raw/ggml_sum ctx emb)]
+      [emb loss])))
 ;; C = torch.randn((27, 2))
 
-;; emb = C[X]
+
+
+
 ;; emb.shape
+
+
 
 ;; W1 = torch.randn((6, 100))
 ;; b1 = torch.randn(100)
@@ -257,3 +357,13 @@
     
 ;;     print(''.join(itos[i] for i in out))
 
+
+(defn -main []
+  
+(let [cpu-sched (ggml/cpu-scheduler)]
+
+  (prn (ggml/compute cpu-sched
+                       my-graph
+                       X C))
+  (identity cpu-sched))
+  
