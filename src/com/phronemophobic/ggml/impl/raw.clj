@@ -148,7 +148,8 @@
      :ggml_vk_available_devices
      :ggml_backend_sycl_host_buffer_type
      :ggml_backend_vk_get_device_memory
-     :ggml_backend_is_cuda})
+     :ggml_backend_is_cuda
+    :ggml_threadpool_params_default})
 
 (defn filter-fns [interface]
   (into {}
