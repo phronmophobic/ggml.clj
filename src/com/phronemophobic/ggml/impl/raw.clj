@@ -160,6 +160,11 @@
                            "ggml_guid_matches"
                            "ggml_rope_yarn_corr_dims"} (name id))))
               (remove (fn [[id info]]
+                        (some
+                         #(str/starts-with? (name id) %)
+                         ["ggml_backend_cann"
+                          "ggml_threadpool"])))
+              (remove (fn [[id info]]
                         (banned id))))
         interface))
 

@@ -369,22 +369,22 @@
   (def cpu-backend (raw/ggml_backend_cpu_init))
 
   (prn
-   :train
-   (train cpu-backend
-          (fn [ctx x a]
-            (let [b (raw/ggml_mul ctx x x)
-                  f (raw/ggml_mul ctx b a)]
-              f)
-            )
-          [(dtt/->tensor
-            [3.0]
-            :datatype :float32
-            :container-type :native-heap)]
-          [ (dtt/->tensor
-             [3.0]
-             :datatype :float32
-             :container-type :native-heap)]
-          ))
+   :gradient
+   (get-gradient cpu-backend
+                 (fn [ctx x a]
+                   (let [b (raw/ggml_mul ctx x x)
+                         f (raw/ggml_mul ctx b a)]
+                     f)
+                   )
+                 [(dtt/->tensor
+                   [3.0]
+                   :datatype :float32
+                   :container-type :native-heap)]
+                 [ (dtt/->tensor
+                    [3.0]
+                    :datatype :float32
+                    :container-type :native-heap)]
+                 ))
   
 
 
